@@ -59,8 +59,10 @@ def validate_batch(entries: list[SegmentIn]) -> None:
 def submit_revision(req: RevisionSubmitRequest) -> dict:
     """提交一批归属区间，成功返回新的递增修订号。
 
-    修订号分配与区间插入在同一个 BEGIN IMMEDIATE 事务内完成：
+    修订号分配、区间插入、待重查标记在同一个 BEGIN IMMEDIATE 事务内完成：
     校验失败/插入失败都会回滚，修订号与数据均保持不变。
+    待重查标记（recheck_requests）与补录共同落库，后台重查线程据此
+    在归属写事务之外重查隔离行，服务重启后 PENDING 标记仍在，不会漏查。
     """
     validate_batch(req.entries)
 
@@ -89,6 +91,12 @@ def submit_revision(req: RevisionSubmitRequest) -> dict:
                 for e in req.entries
             ],
         )
+        # 补录与待重查标记共同落库：后台线程发现 PENDING 标记后，
+        # 在归属写事务之外重查隔离区，归属补齐的隔离行才转正。
+        conn.execute(
+            "INSERT INTO recheck_requests (revision_id) VALUES (?)",
+            (revision_id,),
+        )
         row = conn.execute(
             "SELECT revision_id, entry_count, note, created_at FROM revisions WHERE revision_id = ?",
             (revision_id,),
@@ -96,13 +104,14 @@ def submit_revision(req: RevisionSubmitRequest) -> dict:
     return dict(row)
 
 
-def _lookup_one(
+def lookup_attribution(
     conn: Connection, revision_id: int, employee_id: str, work_date_iso: str
 ) -> tuple[str | None, int | None]:
     """在 revision_id 口径下定位单条工时的成本中心。
 
     仅可见 revision_id <= 给定修订号 的区间；同日期点命中多个历史区间时，
     取修订号最大者（后补录覆盖先补录），区间外/空档则未归属。
+    导入与后台重查共用本函数，保证两处归属口径一致。
     """
     row = conn.execute(
         """
@@ -135,7 +144,7 @@ def attribute_hours(req: AttributionQueryRequest) -> list[AttributionResult]:
 
         results: list[AttributionResult] = []
         for rec in req.records:
-            cost_center, matched = _lookup_one(
+            cost_center, matched = lookup_attribution(
                 conn, req.revision_id, rec.employee_id, rec.work_date.isoformat()
             )
             results.append(

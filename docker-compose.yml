@@ -6,8 +6,10 @@ services:
     ports:
       - "8000:8000"
     environment:
-      # SQLite 文件落在命名卷，容器重建后修订历史仍在
+      # SQLite 文件落在命名卷，容器重建后修订历史与工时数据仍在
       ATTRIBUTION_DB_PATH: /data/attribution.db
+      # 后台重查线程轮询间隔（毫秒）：人事补录后自动重查隔离区
+      RECHECK_POLL_INTERVAL_MS: "500"
     volumes:
       - attribution-data:/data
     restart: unless-stopped
